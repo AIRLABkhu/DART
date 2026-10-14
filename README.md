@@ -24,9 +24,18 @@ git checkout 1df37a1        # "remove __pycache__ folders"; the patch is made ag
 
 Follow SAM-G's own `README.md` for the environment (`bash install_adroit.sh`, MuJoCo 2.1, `mujoco-py`,
 `DHM`, `mjrl`, `mj_envs`), for the `vrl3data` folder (Adroit demos and pretrained encoders, from the
-Google Drive link in SAM-G's README) and for the Places365 dataset. DART itself does not need the
-EfficientViT/PerSAM checkpoints (`use_SAM_g` is `false` in the patched `pieg_config.yaml`), but the SAM-G
-environment package still imports them, so install SAM-G completely.
+Google Drive link in SAM-G's README) and for the Places365 dataset. DART itself does not use the
+SAM-G segmentation path (`use_SAM_g` is `false` in the patched `pieg_config.yaml`), but SAM-G's `dhm`
+package imports `per_segment_anything` (Personalize-SAM) and EfficientViT at import time, so install
+SAM-G completely and put those two checkouts on `PYTHONPATH` as SAM-G's instructions say, together with
+`DHM`, `DHM/mj_envs`, `DHM/mjrl` and `mujoco-py`. A working example (paths adjusted to your machine):
+
+```bash
+export PYTHONPATH=/path/to/SAM-G/mujoco-py:/path/to/SAM-G/DHM:/path/to/SAM-G/DHM/mj_envs:/path/to/SAM-G/DHM/mjrl:/path/to/Personalize-SAM:/path/to/efficientvit/efficientvit
+```
+
+Keep `DHM`, `DHM/mj_envs` and `DHM/mjrl` from the *same* checkout: the environment writes a temporary
+MJCF next to `mj_envs`' assets and reads it back from the `mj_envs` on your path.
 
 ## 2. Apply the DART patch
 
