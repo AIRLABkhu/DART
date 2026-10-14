@@ -1,0 +1,1003 @@
+diff --git a/DHM/dhm/make_env_RRL_sam.py b/DHM/dhm/make_env_RRL_sam.py
+index 7bfcdf5..b47306c 100644
+--- a/DHM/dhm/make_env_RRL_sam.py
++++ b/DHM/dhm/make_env_RRL_sam.py
+@@ -414,7 +414,7 @@ class BasicDHMEnv(gym.Env, ABC):
+ 						img = img.transpose(2, 0, 1)
+ 						# img = (1 - idx) * img + idx * self.video_buf[self.step_count % self.video_len, :,
+ 						#							   :self.cfg_dict['image_height'], :self.cfg_dict['image_width']]
+-						img = (1 - idx) * img + idx * cv2.resize(self.video_buf[self.step_count % self.video_len, :, :, :].transpose(1, 2, 0), (160, 160)).transpose(2, 0, 1)
++						img = (1 - idx) * img + idx * cv2.resize(self.video_buf[self.step_count % self.video_len, :, :, :].transpose(1, 2, 0), (84, 84)).transpose(2, 0, 1)
+ 					elif self.cfg_dict['task']['background']['type'] == 'color':
+ 						pass
+ 					self.step_count += 1
+@@ -767,7 +767,7 @@ class BasicDHMEnvWithSAM(gym.Env, ABC):
+ 		dino_ref_image = self.dino_transform(dino_ref_image).unsqueeze(0).cuda()
+ 		dino_ref_image_embedding = self.dino_model.forward_features(dino_ref_image)
+ 		patch_tokens = dino_ref_image_embedding["x_norm_patchtokens"]
+-		patch_tokens = patch_tokens.reshape([1, 32, 32, 768])
++		patch_tokens = patch_tokens.reshape([1, 32, 32, 384])
+ 		patch_tokens = patch_tokens.permute(0, 3, 1, 2)
+ 		patch_tokens = F.interpolate(patch_tokens, size=(64 ,64), mode='bilinear', align_corners=False)
+ 		patch_tokens = patch_tokens.permute(0, 2, 3, 1)
+@@ -1093,7 +1093,7 @@ class BasicDHMEnvWithSAM(gym.Env, ABC):
+ 		dino_obs_feat = self.dino_transform(obs_feat.transpose(1, 2, 0)).unsqueeze(0).cuda()
+ 		dino_obs_feat = self.dino_model.forward_features(dino_obs_feat)
+ 		patch_tokens = dino_obs_feat["x_norm_patchtokens"]
+-		patch_tokens = patch_tokens.reshape([1, 32, 32, 768])
++		patch_tokens = patch_tokens.reshape([1, 32, 32, 384])
+ 		patch_tokens = patch_tokens.permute(0, 3, 1, 2)
+ 		patch_tokens = F.interpolate(patch_tokens, size=(64, 64), mode='bilinear', align_corners=False)
+ 		patch_tokens = patch_tokens.permute(0, 2, 3, 1)
+@@ -1715,4 +1715,4 @@ def make_env_RRL_sam(env_name, test_image=False, cam_list=None,
+ 
+ 
+ if __name__ == '__main__':
+-	env = make_env_RRL('hammer')
+\ No newline at end of file
++	env = make_env_RRL('hammer')
+diff --git a/src/adroit_eval.sh b/src/adroit_eval.sh
+index d670b2d..62d9540 100644
+--- a/src/adroit_eval.sh
++++ b/src/adroit_eval.sh
+@@ -1,16 +1,16 @@
+-task_name='pen'
++task_name='hammer'
+ save_snapshot=False
+ use_wandb=False
+ stage1_use_pretrain=False
+-num_train_frames=2001000
++num_train_frames=201000
+ stage2_n_update=0
+ save_models=False
+-model_dir=/to/your/path
+-
+-
+-CUDA_VISIBLE_DEVICES=6 python eval_adroit.py \
++# absolute path of a DART run dir containing snapshot200000.pt
++model_dir=/ABSOLUTE/PATH/TO/SAM-G/src/logs/pieg_hammer_16052_0.6_10000
++# $1 = test_pieg_<level>, level in color-easy color-hard video-easy video-hard (see robust_eval_dart.sh)
++MUJOCO_GL=egl CUDA_VISIBLE_DEVICES=0 python eval_adroit_pieg.py \
+ 		task=${task_name} \
+-		seed=16051 \
++		seed=16052 \
+ 		stage1_use_pretrain=${stage1_use_pretrain} \
+ 		save_snapshot=${save_snapshot} \
+ 		device=cuda:0 \
+diff --git a/src/algos/pieg.py b/src/algos/pieg.py
+index 0b7a113..1a7f643 100644
+--- a/src/algos/pieg.py
++++ b/src/algos/pieg.py
+@@ -12,8 +12,41 @@ from torchvision import transforms
+ import utils
+ from utils import random_overlay
+ from vrl3_agent import VRL3Agent, Actor, Critic, RandomShiftsAug
+-
+-
++import io
++import requests
++import os
++import matplotlib.pyplot as plt
++from rl_utils import *
++
++def obs_to_tensors(obs):
++    flatten_obs = obs.view(-1, 3, 84, 84)
++    flatten_obs = F.interpolate(flatten_obs, size = (32,32), mode='bilinear', align_corners=False)
++    return flatten_obs/255.0
++
++def get_background_image_tensor(initial_latent, transform_strength, port):
++    # Serialize the (downsampled) observation batch that is sent to the generator server
++    buffer_initial = io.BytesIO()
++    torch.save(initial_latent.cpu(), buffer_initial)
++    buffer_initial.seek(0)
++
++    # Request URL and payload
++    url = "http://localhost:{}/generate".format(port)
++    files = {
++        'initial_latent': ('initial_latent.pt', buffer_initial, 'application/x-pytorch')
++    }
++    data = {
++        'transform_strength': transform_strength  # sent as form data
++    }
++
++    # Send request
++    response = requests.post(url, files=files, data=data)
++
++    if response.status_code == 200:
++        response_buffer = io.BytesIO(response.content)
++        generated_images = torch.load(response_buffer)
++        return generated_images
++    else:
++        raise ValueError(f"Server returned an error: {response.status_code}, {response.text}")
+ 
+ class ResEncoder(nn.Module):
+     def __init__(self, resolution=84):
+@@ -43,7 +76,7 @@ class ResEncoder(nn.Module):
+         # nn.init.orthogonal_(self.fc.weight.data)
+         # self.fc.bias.data.fill_(0.0)
+ 
+-    @torch.no_grad()
++    #@torch.no_grad()
+     def forward_conv(self, obs, flatten=True):
+         obs = obs / 255.0 - 0.5
+         time_step = obs.shape[1] // self.image_channel
+@@ -78,6 +111,7 @@ class ResEncoder(nn.Module):
+         pass
+ 
+ 
++
+ class PIEGAgent(VRL3Agent):
+     def __init__(self, **kwargs):
+         super(PIEGAgent, self).__init__(**kwargs)
+@@ -105,8 +139,11 @@ class PIEGAgent(VRL3Agent):
+         self.aug = RandomShiftsAug(pad=4)
+         self.train()
+         self.critic_target.train()
++		
++        if not os.path.exists("PIEG"):
++            os.mkdir("PIEG")
+ 
+-
++        
+     def update_critic_vrl3(self, obs, action, reward, discount, next_obs, stddev, update_encoder, conservative_loss_weight, aug_obs):
+         metrics = dict()
+         batch_size = obs.shape[0]
+@@ -194,7 +231,10 @@ class PIEGAgent(VRL3Agent):
+         return metrics
+ 
+ 
+-    def update(self, replay_iter, step, stage, use_sensor):
++
++
++
++    def update(self, replay_iter, step,transform_strength,mixing,port, stage, use_sensor):
+         # for stage 2 and 3, we use the same functions but with different hyperparameters
+         assert stage in (2, 3)
+         metrics = dict()
+@@ -225,7 +265,6 @@ class PIEGAgent(VRL3Agent):
+         else:
+             obs, action, reward, discount, next_obs = utils.to_torch(batch, self.device)
+             obs_sensor, obs_sensor_next = None, None
+-
+         # augment
+         if self.use_data_aug: # true
+             obs = self.aug(obs.float())
+@@ -237,9 +276,42 @@ class PIEGAgent(VRL3Agent):
+ 
+         # encode
+         if update_encoder: # true
++            
++
++            output_diffusion = obs.clone()
++            if transform_strength>0:
++
++
++                # 1. Downsample the batch and query the diffusion server (T = transform_strength)
++                flatten_selected_obs = obs_to_tensors(output_diffusion)  # (B*3, 3, 32, 32) in [0, 1]
++                aug_selected_obs = get_background_image_tensor(flatten_selected_obs, transform_strength, port=port).to(torch.float32)
++                aug_selected_obs=255*F.interpolate(aug_selected_obs,size=(84,84),mode='bilinear', align_corners=False).view(original_obs.shape[0],original_obs.shape[1],original_obs.shape[2],original_obs.shape[3]).to(obs.device)
++                # 2. Blend: `mixing` weights the ORIGINAL frame, (1 - mixing) weights the diffused frame
++                output_diffusion =output_diffusion*mixing+ aug_selected_obs*(1-mixing)
++
++            # 3. Random overlay (Places365) on top of the blended frame, as in PIE-G
++            aug_obs = random_overlay(output_diffusion, device=obs.device)
++
++
++            if step%10000==0:
++                if not os.path.exists("PIEG/{}/{}".format(mixing,step)):
++                    os.makedirs(
++                        "PIEG/{}/{}".format(mixing, step),
++                        exist_ok=True
++                    )
++                path="PIEG/{}/{}".format(mixing,step)
++                for i in range(original_obs.shape[0]):
++                    for j in range(3):
++                        a=obs[i,3*j:3*(j+1),:,:].clone().permute(1,2,0).detach().cpu().numpy().astype(np.uint8)
++                        plt.imsave("{}/Org_{}_{}_{}.png".format(path,i,j,transform_strength),a)
++                        a=aug_obs[i,3*j:3*(j+1),:,:].clone().permute(1,2,0).detach().cpu().numpy().astype(np.uint8)
++                        plt.imsave("{}/Aug_{}_{}_{}.png".format(path,i,j,transform_strength),a)
++
++
++
++            
+             obs = self.encoder(obs)
+-            # strong augmentation
+-            aug_obs = self.encoder(random_overlay(original_obs, self.device))
++            aug_obs = self.encoder(aug_obs)
+         else:
+             with torch.no_grad():
+                 obs = self.encoder(obs)
+diff --git a/src/algos/vrl3_agent.py b/src/algos/vrl3_agent.py
+index b45956c..48814d3 100644
+--- a/src/algos/vrl3_agent.py
++++ b/src/algos/vrl3_agent.py
+@@ -288,7 +288,7 @@ class Critic(nn.Module):
+ 
+ class VRL3Agent:
+     def __init__(self, obs_shape, action_shape, device, use_sensor, lr, feature_dim,
+-                 hidden_dim, critic_target_tau, num_expl_steps,
++                 hidden_dim, port,critic_target_tau, num_expl_steps,
+                  update_every_steps, stddev_clip, use_tb, use_data_aug, encoder_lr_scale,
+                  stage1_model_name, safe_q_target_factor, safe_q_threshold, pretanh_penalty, pretanh_threshold,
+                  stage2_update_encoder, cql_weight, cql_temp, cql_n_random, stage2_std, stage2_bc_weight,
+@@ -299,7 +299,7 @@ class VRL3Agent:
+         self.update_every_steps = update_every_steps
+         self.use_tb = use_tb
+         self.num_expl_steps = num_expl_steps
+-
++        self.port=port
+         self.stage2_std = stage2_std
+         self.stage2_update_encoder = stage2_update_encoder
+ 
+diff --git a/src/cfgs_adroit/config.yaml b/src/cfgs_adroit/config.yaml
+index e3d37d6..2315df8 100644
+--- a/src/cfgs_adroit/config.yaml
++++ b/src/cfgs_adroit/config.yaml
+@@ -60,6 +60,8 @@ stage2_n_update: 30000
+ 
+ # ====== stage 3 ======
+ num_seed_frames: 0
++diffusion_step: 100000
++shift_ratio: 12
+ 
+ agent:
+   _target_: algos.vrl3_agent.VRL3Agent
+@@ -72,6 +74,7 @@ agent:
+   lr: 1e-4
+   hidden_dim: 1024
+   feature_dim: 50
++  port: 5000
+ 
+   # environment related
+   use_sensor: ${use_sensor}
+diff --git a/src/cfgs_adroit/pieg_config.yaml b/src/cfgs_adroit/pieg_config.yaml
+index c981bbd..18ccdcd 100644
+--- a/src/cfgs_adroit/pieg_config.yaml
++++ b/src/cfgs_adroit/pieg_config.yaml
+@@ -16,7 +16,8 @@ debug: 0
+ frame_stack: 3
+ action_repeat: 2
+ discount: 0.99
+-# eval
++port: 5000
++# evalsa
+ eval_every_frames: 50000
+ num_eval_episodes: 15
+ stage2_eval_every_frames: 5000
+@@ -29,6 +30,11 @@ nstep: 3
+ batch_size: 256
+ # misc
+ seed: 1
++k: 1
++tmax: 100
++mixing: 0.0
++domain_ratio: 4
++saliency_ratio: 100
+ device: cuda:0
+ save_video: false
+ save_train_video: false
+@@ -61,6 +67,9 @@ stage2_n_update: 30000
+ 
+ # ====== stage 3 ======
+ num_seed_frames: 0
++diffusion_step: 10000
++shift_ratio: 12
++
+ 
+ agent:
+   _target_: algos.pieg.PIEGAgent
+@@ -71,6 +80,7 @@ agent:
+   update_every_steps: 2
+   use_tb: ${use_tb}
+   lr: 1e-4
++  port: 5000
+   hidden_dim: 1024
+   feature_dim: 256
+ 
+@@ -125,7 +135,7 @@ hydra:
+     nodes: 1
+     submitit_folder: ./exp/${now:%Y.%m.%d}/${now:%H%M%S}_${agent_cfg.experiment}/.slurm
+ 
+-use_SAM_g: true
++use_SAM_g: false
+ handmade_4_SAM:
+   original_image: ../../reference_images/door_0.png
+   masked_image: ../../reference_images/door_masked_0.jpg
+diff --git a/src/cfgs_adroit/sgqn_config.yaml b/src/cfgs_adroit/sgqn_config.yaml
+index 0ddd163..ed43534 100644
+--- a/src/cfgs_adroit/sgqn_config.yaml
++++ b/src/cfgs_adroit/sgqn_config.yaml
+@@ -29,6 +29,7 @@ nstep: 3
+ batch_size: 256
+ # misc
+ seed: 1
++saliency_ratio: 0.1
+ device: cuda
+ save_video: false
+ save_train_video: false
+@@ -48,7 +49,7 @@ feature_dim: 50
+ use_wandb: false
+ wandb_group: none
+ name: sgqn
+-
++model_dir: none
+ # ====== stage 1 ======
+ stage1_model_name: 'resnet6_32channel' # model name example: resnet6_32channel, resnet6_64channel, resnet10_32channel
+ stage1_use_pretrain: true # if false then we start from scratch
+@@ -60,6 +61,8 @@ stage2_n_update: 30000
+ 
+ # ====== stage 3 ======
+ num_seed_frames: 0
++diffusion_step: 100000
++shift_ratio: 12
+ 
+ agent:
+   _target_: algos.sgqn.SGQNAgent
+@@ -72,6 +75,7 @@ agent:
+   lr: 1e-4
+   hidden_dim: 1024
+   feature_dim: 256
++  port: 5000
+   aux_lr: 8e-5
+   aux_beta: 0.99
+   sgqn_quantile: 0.9
+@@ -126,3 +130,13 @@ hydra:
+     mem_gb: 160
+     nodes: 1
+     submitit_folder: ./exp/${now:%Y.%m.%d}/${now:%H%M%S}_${agent_cfg.experiment}/.slurm
++
++
++use_SAM_g: false
++handmade_4_SAM:
++  original_image: ../../reference_images/door_0.png
++  masked_image: ../../reference_images/door_masked_0.jpg
++  extra_points_list: [[38, 14], [42, 31], [28,34], [36,59], [38,61], [37, 75]] # for door_0 we provided
++   # [[36,42], [42, 44], [46, 45], [42, 68], [65, 60], [50, 64], [57, 61]] # for hammer_0 we provided
++   # [[77,45],[80,77],[93,79],[67,88],[86,87],[133,78],[122,95]] for pen_160_0 we provided
++  extra_masked_images_list: [../../reference_images/door_masked_0_1.jpg, ../../reference_images/door_masked_0_2.jpg] # can be empty
+diff --git a/src/eval_adroit_pieg.py b/src/eval_adroit_pieg.py
+new file mode 100644
+index 0000000..5b36377
+--- /dev/null
++++ b/src/eval_adroit_pieg.py
+@@ -0,0 +1,428 @@
++# Copyright (c) Microsoft Corporation.
++# Licensed under the MIT License.
++import sys
++import dhm
++import numpy as np
++import warnings
++
++warnings.filterwarnings('ignore', category=DeprecationWarning)
++import os
++
++os.environ['MKL_SERVICE_FORCE_INTEL'] = '1'
++os.environ['MUJOCO_GL'] = 'egl'
++
++from distutils.dir_util import copy_tree
++import torchvision.transforms as transforms
++from pathlib import Path
++import cv2
++import imageio
++import joblib
++
++import hydra
++import torch
++from dm_env import StepType, TimeStep, specs
++
++import utils
++from logger import Logger
++from replay_buffer import ReplayBufferStorage, make_replay_loader
++from video import TrainVideoRecorder, VideoRecorder
++import pickle
++import time
++from tqdm import tqdm
++import matplotlib.pyplot as plt
++import cv2
++
++torch.backends.cudnn.benchmark = True
++
++# TODO this part can be done during workspace setup
++ENV_TYPE = 'adroit'
++if ENV_TYPE == 'adroit':
++    from adroit import AdroitEnv
++else:
++    import dmc
++IS_ADROIT = True if ENV_TYPE == 'adroit' else False
++
++import sys
++import matplotlib.pyplot as plt
++sys.path.append('./algos')
++
++
++
++def make_agent(obs_spec, action_spec, cfg):
++    cfg.obs_shape = obs_spec.shape
++    cfg.action_shape = action_spec.shape
++    return hydra.utils.instantiate(cfg)
++
++
++class Workspace:
++    def __init__(self, cfg):
++        self.work_dir = Path.cwd()
++        print(f'workspace: {self.work_dir}')
++        self.direct_folder_name = os.path.basename(self.work_dir)
++
++        self.cfg = cfg
++        utils.set_seed_everywhere(cfg.seed)
++        self.device = torch.device(cfg.device)
++        self.replay_buffer_fetch_every = 1000
++        assert len(cfg.wandb_group.split('_')) == 3
++        self.level = cfg.wandb_group.split('_')[2]
++        if self.cfg.debug > 0:  # if debug mode, then change hyperparameters for quick testing
++            self.set_debug_hyperparameters()
++        self.setup()
++
++        print(cfg.wandb_group)
++        self.agent_name = cfg.wandb_group.split('_')[1]
++        self.cfg.task_name = self.cfg.task_name.split('-')[0]
++        work_dir = cfg.model_dir
++        self.model_work_dir = work_dir
++        num = 2000000 if self.cfg.task_name == 'pen' else 1000000
++        device_id = self.cfg.device.split(':')[-1]
++        self.agent = torch.load(f'%s/snapshot{200000}.pt' % (work_dir), map_location=f'cuda:{device_id}')['agent']
++        self.agent.device = self.cfg.device
++        self.agent.encoder = self.agent.encoder.to(self.cfg.device)
++        self.agent.actor = self.agent.actor.to(self.cfg.device)
++        self.agent.critic = self.agent.critic.to(self.cfg.device)
++        self.timer = utils.Timer()
++
++        if self.cfg.task_name == 'pen':
++            self._global_step = int(1e6)
++        else:
++            self._global_step = int(5e5)
++        self._global_episode = 0
++
++        # masked_video_path = 'train.mp4'
++        # fourcc = cv2.VideoWriter_fourcc(*'mp4v')
++        # self.masked_video = cv2.VideoWriter(masked_video_path, fourcc, 10, (84, 84))
++
++
++    def set_debug_hyperparameters(self):
++        self.cfg.num_seed_frames = 1000 if self.cfg.num_seed_frames > 1000 else self.cfg.num_seed_frames
++        self.cfg.agent.num_expl_steps = 500 if self.cfg.agent.num_expl_steps > 1000 else self.cfg.agent.num_expl_steps
++        if self.cfg.replay_buffer_num_workers > 1:
++            self.cfg.replay_buffer_num_workers = 1
++        self.cfg.num_eval_episodes = 1
++        self.cfg.replay_buffer_size = 30000
++        self.cfg.batch_size = 8
++        self.cfg.feature_dim = 8
++        self.cfg.num_train_frames = 5050
++        self.replay_buffer_fetch_every = 30
++        self.cfg.stage2_n_update = 100
++        self.cfg.num_demo = 3
++        self.cfg.eval_every_frames = 3000
++        self.cfg.agent.hidden_dim = 8
++        self.cfg.agent.num_expl_steps = 500
++        self.cfg.stage2_eval_every_frames = 50
++
++    def create_adroit_env(self):
++
++        self.train_env = dhm.make_env_RRL_sam(self.env_name, test_image=False, num_repeats=self.cfg.action_repeat, input_resolution=self.cfg.input_resolution,
++                                          num_frames=self.cfg.frame_stack, env_feature_type=self.env_feature_type, use_SAM_g=self.cfg.use_SAM_g, handmade_4_SAM=self.cfg.handmade_4_SAM,
++                                          device=self.device, reward_rescale=self.cfg.reward_rescale, mode='test', seed=self.cfg.seed, level=self.level)
++        self.eval_env = dhm.make_env_RRL_sam(self.env_name, test_image=False, num_repeats=self.cfg.action_repeat, input_resolution=self.cfg.input_resolution,
++                                         num_frames=self.cfg.frame_stack, env_feature_type=self.env_feature_type, use_SAM_g=self.cfg.use_SAM_g, handmade_4_SAM=self.cfg.handmade_4_SAM,
++                                         device=self.device, reward_rescale=self.cfg.reward_rescale, mode='test', seed=self.cfg.seed, level=self.level)
++
++    def setup(self):
++        warnings.filterwarnings('ignore', category=DeprecationWarning)
++
++        if self.cfg.save_models:
++            assert self.cfg.action_repeat % 2 == 0
++
++        # create logger
++        self.logger = Logger(self.work_dir, use_tb=self.cfg.use_tb)
++        env_name = self.cfg.task_name
++        self.env_name = env_name
++        env_type = 'adroit' if env_name in ('hammer-v0', 'door-v0', 'pen-v0', 'relocate-v0') else 'dmc'
++        # assert env_name in ('hammer-v0','door-v0','pen-v0','relocate-v0',)
++
++        if self.cfg.agent.encoder_lr_scale == 'auto':
++            if env_name == 'relocate-v0':
++                self.cfg.agent.encoder_lr_scale = 0.01
++            else:
++                self.cfg.agent.encoder_lr_scale = 1
++
++        self.env_feature_type = self.cfg.env_feature_type
++        if env_type == 'adroit':
++            self.train_env = dhm.make_env_RRL_sam(env_name, test_image=False, num_repeats=self.cfg.action_repeat, input_resolution=self.cfg.input_resolution,
++                                              num_frames=self.cfg.frame_stack, env_feature_type=self.env_feature_type, use_SAM_g=self.cfg.use_SAM_g, handmade_4_SAM=self.cfg.handmade_4_SAM,
++                                              device=self.device, reward_rescale=self.cfg.reward_rescale, mode='test', seed=self.cfg.seed, level=self.level)
++            self.eval_env = dhm.make_env_RRL_sam(env_name, test_image=False, num_repeats=self.cfg.action_repeat, input_resolution=self.cfg.input_resolution,
++                                             num_frames=self.cfg.frame_stack, env_feature_type=self.env_feature_type, use_SAM_g=self.cfg.use_SAM_g, handmade_4_SAM=self.cfg.handmade_4_SAM,
++                                             device=self.device, reward_rescale=self.cfg.reward_rescale, mode='test', seed=self.cfg.seed, level=self.level)
++
++            data_specs = (self.train_env.observation_spec(),
++                          self.train_env.observation_sensor_spec(),
++                          self.train_env.action_spec(),
++                          specs.Array((1,), np.float32, 'reward'),
++                          specs.Array((1,), np.float32, 'discount'),
++                          specs.Array((1,), np.int8, 'n_goal_achieved'),
++                          specs.Array((1,), np.float32, 'time_limit_reached'),
++                          )
++
++        # create replay buffer
++        self.replay_storage = ReplayBufferStorage(data_specs, self.work_dir / 'buffer')
++
++        self.replay_loader = make_replay_loader(
++            self.work_dir / 'buffer', self.cfg.replay_buffer_size,
++            self.cfg.batch_size, self.cfg.replay_buffer_num_workers,
++            self.cfg.save_snapshot, self.cfg.nstep, self.cfg.discount, self.replay_buffer_fetch_every,
++            is_adroit=IS_ADROIT)
++        self._replay_iter = None
++
++        self.video_recorder = VideoRecorder(
++            self.work_dir if self.cfg.save_video else None)
++        self.train_video_recorder = TrainVideoRecorder(
++            self.work_dir if self.cfg.save_train_video else None)
++
++    def set_demo_buffer_nstep(self, nstep):
++        self.replay_loader_demo.dataset._nstep = nstep
++
++    @property
++    def global_step(self):
++        return self._global_step
++
++    @property
++    def global_episode(self):
++        return self._global_episode
++
++    @property
++    def global_frame(self):
++        return self.global_step * self.cfg.action_repeat
++
++    @property
++    def replay_iter(self):
++        if self._replay_iter is None:
++            self._replay_iter = iter(self.replay_loader)
++        return self._replay_iter
++
++    def eval_adroit(self, force_number_episodes=None, do_log=True):
++
++        step, episode, total_reward = 0, 0, 0
++        n_eval_episode = 100
++        total_success = 0.0
++        for i in tqdm(range(n_eval_episode)):
++            n_goal_achieved_total = 0
++            time_step = self.eval_env.reset()
++            self.video_recorder.init(self.eval_env, enabled=(episode == 0))
++            while not time_step.last():
++                
++                # self.masked_video.write(time_step.observation[6:9].transpose(1, 2, 0)[:, :, ::-1])
++
++                if self.agent_name == 'pieg':
++                    with torch.no_grad():
++                        observation = time_step.observation
++                        action = self.agent.act(observation,
++                                                self.global_step,
++                                                eval_mode=True,
++                                                obs_sensor=time_step.observation_sensor)
++                else:
++                    with torch.no_grad(), utils.eval_mode(self.agent):
++                        observation = time_step.observation
++                        action = self.agent.act(observation,
++                                                self.global_step,
++                                                eval_mode=True,
++                                                obs_sensor=time_step.observation_sensor)
++                time_step = self.eval_env.step(action)
++                n_goal_achieved_total += time_step.n_goal_achieved
++                self.video_recorder.record(self.eval_env)
++                total_reward += time_step.reward
++                step += 1
++
++            # self.masked_video.release()
++
++            # here check if success for Adroit tasks. The threshold values come from the mj_envs code
++            # e.g. https://github.com/ShahRutav/mj_envs/blob/5ee75c6e294dda47983eb4c60b6dd8f23a3f9aec/mj_envs/hand_manipulation_suite/pen_v0.py
++            # can also use the evaluate_success function from Adroit envs, but can be more complicated
++            if self.cfg.task_name == 'pen-v0':
++                threshold = 20
++            else:
++                threshold = 25
++            if n_goal_achieved_total > threshold:
++                total_success += 1
++
++            episode += 1
++            self.video_recorder.save(f'{self.global_frame}.mp4')
++        success_rate_standard = total_success / n_eval_episode
++        episode_reward_standard = total_reward / episode
++        episode_length_standard = step * self.cfg.action_repeat / episode
++
++        f = open("{}/file_{}.txt".format(self.model_work_dir, self.cfg.seed), 'a')
++        f.write("episode_reward: %f \n" % (float(episode_reward_standard)))
++        f.write("success_rate: %f \n" % (float(success_rate_standard)))
++        f.close()
++        print(f"Seed {self.cfg.seed}  ||  Success rate: {success_rate_standard}")
++
++        if do_log:
++            with self.logger.log_and_dump_ctx(self.global_frame, ty='eval') as log:
++                log('episode_reward', episode_reward_standard)
++                log('success_rate', success_rate_standard)
++                log('episode_length', episode_length_standard)
++                log('episode', self.global_episode)
++                log('step', self.global_step)
++
++        return episode_reward_standard, success_rate_standard
++
++
++    def save_snapshot(self, suffix=None):
++        if suffix is None:
++            save_name = 'snapshot.pt'
++        else:
++            save_name = 'snapshot' + suffix + '.pt'
++        snapshot = self.work_dir / save_name
++        keys_to_save = ['agent', 'timer', '_global_step', '_global_episode']
++        payload = {k: self.__dict__[k] for k in keys_to_save}
++        with snapshot.open('wb') as f:
++            torch.save(payload, f)
++        print("snapshot saved to:", str(snapshot))
++
++    def load_snapshot(self):
++        snapshot = self.work_dir / 'snapshot.pt'
++        with snapshot.open('rb') as f:
++            payload = torch.load(f)
++        for k, v in payload.items():
++            self.__dict__[k] = v
++
++        step, episode, total_reward = 0, 0, 0
++        images = []
++        camera_name = 'vil_camera'
++        timestep = self.eval_env.reset()
++
++        n_eval_episode = 1
++        total_success = 0.0
++        for i in tqdm(range(n_eval_episode)):
++            n_goal_achieved_total = 0
++            time_step = self.eval_env.reset()
++            obs = self.eval_env._env._env.env.sim.render(width=224, height=224, mode='offscreen', camera_name=camera_name, device_id=0)
++            if camera_name == 'vil_camera':
++                obs = obs[::-1, :, :]
++            images.append(obs)
++
++            # images.append(time_step.observation[6:9].transpose(1, 2, 0))
++            self.video_recorder.init(self.eval_env, enabled=(episode == 0))
++            while not time_step.last():
++                with torch.no_grad(), utils.eval_mode(self.agent):
++                    observation = time_step.observation
++                    action = self.agent.act(observation,
++                                            self.global_step,
++                                            eval_mode=True,
++                                            obs_sensor=time_step.observation_sensor)
++                time_step = self.eval_env.step(action)
++                obs = self.eval_env._env._env.env.sim.render(width=224, height=224, mode='offscreen', camera_name=camera_name,
++                                                             device_id=0)
++                if camera_name == 'vil_camera':
++                    obs = obs[::-1, :, :]
++                images.append(obs)
++                # images.append(time_step.observation[6:9].transpose(1, 2, 0))
++                n_goal_achieved_total += time_step.n_goal_achieved
++                self.video_recorder.record(self.eval_env)
++                total_reward += time_step.reward
++                step += 1
++
++            # here check if success for Adroit tasks. The threshold values come from the mj_envs code
++            # e.g. https://github.com/ShahRutav/mj_envs/blob/5ee75c6e294dda47983eb4c60b6dd8f23a3f9aec/mj_envs/hand_manipulation_suite/pen_v0.py
++            # can also use the evaluate_success function from Adroit envs, but can be more complicated
++            if self.cfg.task_name == 'pen-v0':
++                threshold = 20
++            else:
++                threshold = 25
++            if n_goal_achieved_total > threshold:
++                total_success += 1
++
++            episode += 1
++            self.video_recorder.save(f'{self.global_frame}.mp4')
++        success_rate_standard = total_success / n_eval_episode
++        episode_reward_standard = total_reward / episode
++        episode_length_standard = step * self.cfg.action_repeat / episode
++
++        print(f"Success rate: {success_rate_standard}")
++        print(f"Episode reward: {episode_reward_standard}")
++
++        imageio.mimsave('%s/%s.gif' % (self.work_dir, self.agent_name), [np.array(img) for i, img in enumerate(images) if i % 1 == 0], fps=15)
++
++
++    def record_video_gif(self):
++        """
++        visualize your own trained model in vil_camera view.
++        """
++
++        step, episode, total_reward = 0, 0, 0
++        images = []
++        camera_name = 'vil_camera'
++        # timestep = self.eval_env.reset()
++        n_eval_episode = 1
++        total_success = 0.0
++        for i in tqdm(range(n_eval_episode)):
++            count = 0
++            n_goal_achieved_total = 0
++            time_step = self.eval_env.reset()
++            image = self.eval_env.render(image_size=256, camera_name=camera_name)
++            images.append(image[::-1, :, :])
++            # images.append(obs)
++            # images.append(time_step.observation[6:9].transpose(1, 2, 0)[::-1, :, :])
++            self.video_recorder.init(self.eval_env, enabled=(episode == 0))
++            while not time_step.last():
++                with torch.no_grad(), utils.eval_mode(self.agent):
++                    observation = time_step.observation
++                    action = self.agent.act(observation,
++                                            self.global_step,
++                                            eval_mode=True,
++                                            obs_sensor=time_step.observation_sensor)
++                time_step = self.eval_env.step(action)
++                image = self.eval_env.render(image_size=256, camera_name=camera_name)
++                images.append(image[::-1, :, :])
++                # images.append(time_step.observation[6:9].transpose(1, 2, 0)[::-1, :, :])
++                n_goal_achieved_total += time_step.n_goal_achieved
++                self.video_recorder.record(self.eval_env)
++                total_reward += time_step.reward
++                step += 1
++                count += 1
++                if count == 40:
++                    break
++
++            # here check if success for Adroit tasks. The threshold values come from the mj_envs code
++            # e.g. https://github.com/ShahRutav/mj_envs/blob/5ee75c6e294dda47983eb4c60b6dd8f23a3f9aec/mj_envs/hand_manipulation_suite/pen_v0.py
++            # can also use the evaluate_success function from Adroit envs, but can be more complicated
++            if self.cfg.task_name == 'pen-v0':
++                threshold = 20
++            else:
++                threshold = 25
++            if n_goal_achieved_total > threshold:
++                total_success += 1
++
++            episode += 1
++            self.video_recorder.save(f'{self.global_frame}.mp4')
++        success_rate_standard = total_success / n_eval_episode
++        episode_reward_standard = total_reward / episode
++        episode_length_standard = step * self.cfg.action_repeat / episode
++
++        print(f"Success rate: {success_rate_standard}")
++        print(f"Episode reward: {episode_reward_standard}")
++
++        imageio.mimsave('%s/%s.gif' % (self.work_dir, self.agent_name), [np.array(img) for i, img in enumerate(images) if i % 1 == 0], fps=15)
++
++
++    def del_xml(self):
++        self.train_env.del_xml()
++
++
++@hydra.main(config_path='cfgs_adroit', config_name='pieg_config')
++def main(cfg):
++    # TODO potentially check the task name and decide which libs to load here?
++    W = Workspace
++    root_dir = Path.cwd()
++    if 'use_SAM_g' not in cfg:
++        cfg.use_SAM_g = False
++        cfg.handmade_4_SAM = None
++    workspace = W(cfg)
++    snapshot = root_dir / 'snapshot.pt'
++    
++    if snapshot.exists():
++        print(f'resuming: {snapshot}')
++        workspace.load_snapshot()
++    # workspace.record_video_gif()
++    workspace.eval_adroit()
++    workspace.del_xml()
++
++
++if __name__ == '__main__':
++    main()
+\ No newline at end of file
+diff --git a/src/robust_eval_dart.sh b/src/robust_eval_dart.sh
+new file mode 100644
+index 0000000..a55b1db
+--- /dev/null
++++ b/src/robust_eval_dart.sh
+@@ -0,0 +1,14 @@
++#!/bin/bash
++# Robust evaluation of one DART run on the 4 Adroit distraction settings
++# (100 episodes per level, appended to <model_dir>/file_<seed>.txt).
++# Usage: bash robust_eval_dart.sh <GPU> <task> <seed> <abs model_dir>
++# The level is passed through wandb_group=test_pieg_<level> (exactly two underscores,
++# hyphenated level names); eval_adroit_pieg.py parses it. No generator server is needed.
++GPU=$1; TASK=$2; SEED=$3; MODEL_DIR=$4
++for lvl in color-easy color-hard video-easy video-hard; do
++  echo ">>> EVAL $TASK seed=$SEED $lvl"
++  MUJOCO_GL=egl MKL_SERVICE_FORCE_INTEL=1 CUDA_VISIBLE_DEVICES=$GPU python eval_adroit_pieg.py \
++    task=$TASK seed=$SEED device=cuda:0 stage1_use_pretrain=False save_snapshot=False \
++    use_wandb=False stage2_n_update=0 num_train_frames=201000 save_models=False \
++    model_dir=$MODEL_DIR wandb_group=test_pieg_${lvl} || echo "!!! EVAL FAILED $TASK $SEED $lvl"
++done
+diff --git a/src/train.sh b/src/train.sh
+index bb9d837..72c8ca8 100644
+--- a/src/train.sh
++++ b/src/train.sh
+@@ -1,22 +1,35 @@
+-task_name='door'
++#!/bin/bash
++
+ save_snapshot=False
+ use_wandb=False
+ stage1_use_pretrain=False
+-num_train_frames=1001000 # notice that 2001000 for pen !!!!!!!!!!
++num_train_frames=201000 
+ stage2_n_update=0
+ save_models=True
+-local_data_dir='/localdata/ziyuwang21/vigen_adroit/vrl3data/vrl3data'
++# must be an ABSOLUTE path (Hydra chdirs into the run dir)
++local_data_dir=/ABSOLUTE/PATH/TO/SAM-G/src/vrl3data
+ 
++port=5000          # port of the running generator server (make_image_tinysd.py)
+ 
+-CUDA_VISIBLE_DEVICES=2 python train_adroit_dhm.py \
+-		task=${task_name} \
+-		seed=16051\
+-		stage1_use_pretrain=${stage1_use_pretrain} \
+-		save_snapshot=${save_snapshot} \
+-		device=cuda:0 \
+-		local_data_dir=${local_data_dir} \
+-		use_wandb=${use_wandb} \
+-		stage2_n_update=${stage2_n_update} \
+-		num_train_frames=${num_train_frames} \
+-		save_models=${save_models} \
+-		wandb_group=$2
+\ No newline at end of file
++for task in 'door' 'hammer'; do
++  case $task in door) mixing=0.7 ;; hammer) mixing=0.8 ;; esac   # lambda per task (paper Table I)
++  for mixing in $mixing; do
++    for seed in 16051 16052 16053; do
++      MUJOCO_GL=egl MKL_SERVICE_FORCE_INTEL=1 CUDA_VISIBLE_DEVICES=0 python train_adroit_dhm.py \
++        task=${task} \
++        seed=${seed} \
++        stage1_use_pretrain=${stage1_use_pretrain} \
++        save_snapshot=${save_snapshot} \
++        device=cuda:0 \
++        local_data_dir=${local_data_dir} \
++        use_wandb=${use_wandb} \
++        stage2_n_update=${stage2_n_update} \
++        num_train_frames=${num_train_frames} \
++        save_models=${save_models} \
++        wandb_group=${1:-dart} \
++        port=${port} \
++        mixing=${mixing} \
++        hydra.run.dir=logs/pieg_${task}_${seed}_${mixing}_10000
++    done
++  done
++done
+\ No newline at end of file
+diff --git a/src/train_adroit_dhm.py b/src/train_adroit_dhm.py
+index 3ed6ce8..21bb78a 100644
+--- a/src/train_adroit_dhm.py
++++ b/src/train_adroit_dhm.py
+@@ -46,13 +46,30 @@ else:
+ IS_ADROIT = True if ENV_TYPE == 'adroit' else False
+ 
+ 
+-# def get_ram_info():
+-#     # get info on RAM usage
+-#     d = dict(psutil.virtual_memory()._asdict())
+-#     for key in d:
+-#         if key != "percent": # convert to GB
+-#             d[key] = int(d[key] / 1024**3 * 100)/ 100
+-#     return d
++
++
++def erdaa(train_episode_rewards,T,args):
++
++    if len(train_episode_rewards)<=10:
++        return 1
++    
++    train_episode_rewards = np.array(train_episode_rewards)
++
++    slopes = np.diff(train_episode_rewards)
++    fluctuation_strength = np.std(slopes)
++    if fluctuation_strength==0:
++            return 1
++    # Fluctuation multiplier. The paper's Adroit runs used *10000 (run-dir suffix `_10000`).
++    # *1000 (no suffix) and *100 (`_100`) are ablation variants; switch by editing this line.
++    first = fluctuation_strength*10000
++    # first = fluctuation_strength*1000
++    # first = fluctuation_strength*100
++    second = fluctuation_strength
++    residuals = np.diff(train_episode_rewards)
++    
++    residuals = first * np.tanh(residuals[-1] / second)
++    T = np.clip(T+residuals, 1, args.tmax)
++    return T
+ 
+ def make_agent(obs_spec, action_spec, cfg):
+     cfg.obs_shape = obs_spec.shape
+@@ -62,7 +79,7 @@ def make_agent(obs_spec, action_spec, cfg):
+ 
+ class Workspace:
+     def __init__(self, cfg):
+-        self.work_dir = Path.cwd()
++        self.work_dir =Path.cwd()
+         print("====== Training log stored to: ======")
+         print(f'workspace: {self.work_dir}')
+         self.direct_folder_name = os.path.basename(self.work_dir)
+@@ -74,7 +91,10 @@ class Workspace:
+         if self.cfg.debug > 0:  # if debug mode, then change hyperparameters for quick testing
+             self.set_debug_hyperparameters()
+         self.setup()
+-
++        print(self.cfg.agent)
++        self.port=cfg.port
++        self.domain_ratio=cfg.domain_ratio
++        self.saliency_ratio=cfg.saliency_ratio
+         self.agent = make_agent(self.train_env.observation_spec(),
+                                 self.train_env.action_spec(),
+                                 self.cfg.agent)
+@@ -412,6 +432,11 @@ class Workspace:
+ 
+         episode_step_since_log, episode_reward_list, episode_frame_list = 0, [0], [0]
+         self.timer.reset()
++        prev_episode_reward=None
++        diff_transform_strength=0
++        transform_strength=1
++        train_episode_rewards=[]
++        history_steps=[]
+         while train_until_step(self.global_step):
+             # if 1000 steps passed, do some logging
+             if self.global_step % 1000 == 0 and metrics is not None:
+@@ -420,11 +445,13 @@ class Workspace:
+                 with self.logger.log_and_dump_ctx(self.global_frame, ty='train') as log:
+                     log('fps', episode_frame_since_log / elapsed_time)
+                     log('total_time', total_time)
+-                    log('episode_reward', np.mean(episode_reward_list))
++                    log('episode_reward_mean', np.mean(episode_reward_list))
++                    log('episode_reward',episode_reward_list[-1])
+                     log('episode_length', np.mean(episode_frame_list))
+                     log('episode', self.global_episode)
+                     log('buffer_size', len(self.replay_storage))
+                     log('step', self.global_step)
++                    log('ES_Step', transform_strength)
+ 
+                 if self.cfg.use_wandb:
+                     wandb.log({"train_reward": np.mean(episode_reward_list)})
+@@ -443,13 +470,16 @@ class Workspace:
+                     episode_frame = episode_step * self.cfg.action_repeat
+                     episode_frame_list.append(episode_frame)
+ 
++
+                 # reset env
+                 time_step = self.train_env.reset()
+                 self.replay_storage.add(time_step)
+                 self.train_video_recorder.init(time_step.observation)
+                 # try to save snapshot
+-                if self.cfg.save_snapshot:
+-                    self.save_snapshot()
++                #history_steps.append(step)
++                train_episode_rewards.append(episode_reward)
++                transform_strength=erdaa(train_episode_rewards,transform_strength,self.cfg)
++
+                 episode_step, episode_reward = 0, 0
+ 
+             # try to evaluate
+@@ -470,10 +500,9 @@ class Workspace:
+ 
+             # update the agent
+             if not seed_until_step(self.global_step):
+-                metrics = self.agent.update(self.replay_iter, self.global_step, stage=3, use_sensor=IS_ADROIT)
++                metrics = self.agent.update(self.replay_iter, self.global_step,transform_strength,self.cfg.mixing,self.port, stage=3, use_sensor=IS_ADROIT)
+                 self.logger.log_metrics(metrics, self.global_frame, ty='train')
+-
+-            # take env step
++                # take env step
+             time_step = self.train_env.step(action)
+             episode_reward += time_step.reward
+             self.replay_storage.add(time_step)
+@@ -489,9 +518,8 @@ class Workspace:
+             #         print(e)
+ 
+             """here save model for later"""
+-            if self.cfg.save_models:
+-                if self.global_frame in (1000000, 2000000, 4000000):
+-                    self.save_snapshot(suffix=str(self.global_frame))
++            if self.cfg.save_models and self.global_step%100000==0:
++                self.save_snapshot(suffix=str(self.global_frame))
+ 
+         # try:
+         #     pass

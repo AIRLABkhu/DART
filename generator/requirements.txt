@@ -1,0 +1,12 @@
+# Versions from the conda env used for the paper (Python 3.8.8); only the packages imported by
+# make_image.py and pipeline_rf.py (plus their direct runtime dependencies) are listed.
+torch==2.0.1
+torchvision==0.15.2
+diffusers==0.24.0
+transformers==4.35.2
+accelerate==0.24.1
+safetensors==0.3.3
+huggingface-hub==0.25.1
+Flask==3.0.3
+numpy==1.19.5
+Pillow==9.5.0
