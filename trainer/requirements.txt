@@ -1,0 +1,19 @@
+# Trainer environment used for the paper runs: Python 3.8, CUDA 11.6.
+# MuJoCo 2.1.0 (mujoco210) must be unpacked in ~/.mujoco and ~/.mujoco/mujoco210/bin on LD_LIBRARY_PATH
+# (see install.sh). gym must stay at 0.21: gym>=0.22 removed gym.envs.robotics, which the robot env builds on.
+torch==1.12.1
+torchvision==0.13.1
+gym==0.21.0
+mujoco-py==2.1.2.14
+numpy==1.24.4
+opencv-python==4.5.3.56
+imageio==2.35.1
+imageio-ffmpeg==0.4.4
+termcolor==1.1.0
+requests==2.32.4
+matplotlib==3.7.5
+kornia==0.5.11
+captum==0.7.0
+tensorboard==2.14.0
+# test_robot.py (table aggregation) only:
+pandas

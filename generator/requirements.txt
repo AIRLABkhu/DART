@@ -1,0 +1,19 @@
+# Generator environment (separate from the trainer env). Versions are the ones used for the paper runs.
+# Python 3.8.8, CUDA GPU required (the pipeline is loaded in float16 on cuda).
+torch==2.0.1
+diffusers==0.24.0
+transformers==4.35.2
+huggingface-hub==0.25.1
+accelerate==0.24.1
+safetensors==0.3.3
+Flask==3.0.3
+numpy==1.19.5
+Pillow==9.5.0
+packaging
+#
+# Model weights are pulled from the Hugging Face hub on first start:
+#   XCLIU/instaflow_0_9B_from_sd_1_5   (InstaFlow 0.9B, 1-step rectified flow, SD-1.5 based)
+#   sayakpaul/taesd-diffusers          (TAESD tiny VAE)
+#
+# Run (from this directory, one server per GPU, port must match the trainer's --port):
+#   CUDA_VISIBLE_DEVICES=0 python make_image.py --port 5000
