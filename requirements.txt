@@ -1,0 +1,32 @@
+# Python 3.8 (tested with 3.8.8). Versions are those of the environment the paper runs used.
+# PyTorch was installed with CUDA 11.7 wheels: torch==2.0.1 torchvision==0.15.2
+torch==2.0.1
+torchvision==0.15.2
+numpy==1.19.5
+diffusers==0.24.0
+transformers==4.35.2
+accelerate==0.24.1
+huggingface-hub==0.25.1
+safetensors==0.3.3
+packaging==23.1
+gym==0.23.1
+dm-env==1.6
+dm-tree==0.1.8
+absl-py==1.4.0
+lxml==5.2.2
+glfw==2.7.0
+PyOpenGL==3.1.7
+scipy==1.10.0
+Pillow==9.5.0
+opencv-python==4.10.0.84
+imageio==2.30.0
+imageio-ffmpeg==0.5.1
+kornia==0.6.8
+captum==0.7.0
+matplotlib==3.6.3
+termcolor==2.4.0
+requests==2.31.0
+# aggregation only (main_table.py)
+pandas==1.4.3
+seaborn==0.12.2
+# dm_control and dmc2gym are bundled under src/env/ (see README); MuJoCo 2.0 binaries are required.
